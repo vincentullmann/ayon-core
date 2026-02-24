@@ -38,7 +38,14 @@ class FolderItem:
     """
 
     def __init__(
-        self, entity_id, parent_id, name, path, folder_type, label
+        self,
+        entity_id: str,
+        parent_id: str | None,
+        name: str,
+        path: str,
+        folder_type: str,
+        label: str | None = None,
+        status: str = "",
     ):
         self.entity_id = entity_id
         self.parent_id = parent_id
@@ -46,6 +53,7 @@ class FolderItem:
         self.path = path
         self.folder_type = folder_type
         self.label = label or name
+        self.status = status
 
     def to_data(self):
         """Converts folder item to data.
@@ -61,6 +69,7 @@ class FolderItem:
             "path": self.path,
             "folder_type": self.folder_type,
             "label": self.label,
+            "status": self.status,
         }
 
     @classmethod
@@ -196,7 +205,8 @@ def _get_folder_item_from_hierarchy_item(item):
         name,
         path,
         item["folderType"],
-        item["label"]
+        item["label"],
+        status=item["status"],
     )
 
 
@@ -219,6 +229,16 @@ class HierarchyModel(object):
     folder or project. Tasks can have as parent only folder.
     """
     lifetime = 60  # A minute
+
+    folder_fields = [
+        "id",
+        "name",
+        "label",
+        "parentId",
+        "path",
+        "folderType",
+        "status",
+    ]
 
     def __init__(self, controller):
         self._tags_by_entity_type = NestedCacheItem(
@@ -301,7 +321,7 @@ class HierarchyModel(object):
         folders = ayon_api.get_folders(
             project_name,
             folder_ids=folder_ids,
-            fields=["id", "name", "label", "parentId", "path", "folderType"]
+            fields=self.folder_fields,
         )
         # Make sure all folder ids are in output
         output = {folder_id: None for folder_id in folder_ids}
@@ -339,7 +359,7 @@ class HierarchyModel(object):
         folders = ayon_api.get_folders(
             project_name,
             folder_paths=folder_paths,
-            fields=["id", "name", "label", "parentId", "path", "folderType"]
+            fields=self.folder_fields,
         )
         # Make sure all folder ids are in output
         for folder in folders:

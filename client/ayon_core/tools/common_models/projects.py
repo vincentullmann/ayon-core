@@ -416,6 +416,21 @@ class ProjectsModel(object):
             self._project_statuses_cache[project_name] = statuses_cache
         return list(statuses_cache)
 
+    def get_project_status_item(self, project_name: str, status_name: str) -> StatusItem | None:
+        """Get project status.
+
+        Args:
+            project_name (str): Project name.
+            status_name (str): Status name.
+
+        Returns:
+            StatusItem | None: Status item or None if status was not found.
+        """
+        for status in self.get_project_status_items(project_name, sender=None):
+            if status.name == status_name:
+                return status
+        return None
+
     def get_folder_type_items(self, project_name, sender):
         """Get project status items.
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 import collections
+import typing
 from typing import Optional
 
 from qtpy import QtWidgets, QtGui, QtCore
@@ -17,6 +18,10 @@ from .views import TreeView
 from .lib import RefreshThread, get_qt_icon
 from .widgets import PlaceholderLineEdit
 from .nice_checkbox import NiceCheckbox
+
+if typing.TYPE_CHECKING:
+    from ayon_core.tools.common_models.hierarchy import FolderItem
+    from ayon_core.tools.launcher.control import BaseLauncherController
 
 
 FOLDERS_MODEL_SENDER_NAME = "qt_folders_model"
@@ -36,7 +41,7 @@ class FoldersQtModel(QtGui.QStandardItemModel):
     _default_folder_icon = None
     refreshed = QtCore.Signal()
 
-    def __init__(self, controller):
+    def __init__(self, controller: BaseLauncherController):
         super().__init__()
 
         self.setColumnCount(1)
@@ -213,19 +218,32 @@ class FoldersQtModel(QtGui.QStandardItemModel):
         folder_type_item_by_name,
         folder_type_icon_cache
     ):
-        icon = folder_type_icon_cache.get(folder_item.folder_type)
-        if icon is not None:
-            return icon
 
-        folder_type_item = folder_type_item_by_name.get(
-            folder_item.folder_type
-        )
+
+        # key = (folder_item.folder_type, folder_item.status)
+        # if icon := folder_type_icon_cache.get(key):
+        #             return icon
+
+        folder_type_item = folder_type_item_by_name.get(folder_item.folder_type)
         icon = None
+
+        status_item = self._controller.get_project_status_item(
+            self.get_project_name(),
+            folder_item.status
+        )
+
+        icon_name = ""
+        if folder_type_item:
+            icon_name = folder_type_item.icon
+        if status_item:
+            icon_name = status_item.icon
+
+        color = self._get_folder_item_color(folder_item) or get_default_entity_icon_color()
         if folder_type_item is not None:
             icon = get_qt_icon({
                 "type": "material-symbols",
-                "name": folder_type_item.icon,
-                "color": get_default_entity_icon_color()
+                "name": icon_name,
+                "color": color
             })
 
         if icon is None:
@@ -233,6 +251,19 @@ class FoldersQtModel(QtGui.QStandardItemModel):
         folder_type_icon_cache[folder_item.folder_type] = icon
         return icon
 
+    def _get_folder_item_color(self, folder_item: FolderItem) -> QtGui.QColor | None:
+        if not (status_name := folder_item.status):
+            return None
+
+        project_name = self.get_project_name()
+        if not (status_item := self._controller.get_project_status_item(
+            project_name,
+            status_name,
+        )):
+            return None
+
+        return QtGui.QColor(status_item.color)
+    
     def _fill_item_data(
         self,
         item,
@@ -256,8 +287,11 @@ class FoldersQtModel(QtGui.QStandardItemModel):
         item.setData(folder_item.name, FOLDER_NAME_ROLE)
         item.setData(folder_item.path, FOLDER_PATH_ROLE)
         item.setData(folder_item.folder_type, FOLDER_TYPE_ROLE)
-        item.setData(folder_item.label, QtCore.Qt.DisplayRole)
-        item.setData(icon, QtCore.Qt.DecorationRole)
+        item.setData(folder_item.label, QtCore.Qt.ItemDataRole.DisplayRole)
+        item.setData(icon, QtCore.Qt.ItemDataRole.DecorationRole)
+
+        color = self._get_folder_item_color(folder_item) or QtGui.QColor()
+        item.setData(color, QtCore.Qt.ItemDataRole.ForegroundRole)
 
     def _fill_items(self, folder_items_by_id, folder_type_items):
         if not folder_items_by_id:

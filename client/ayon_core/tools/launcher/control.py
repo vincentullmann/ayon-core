@@ -118,6 +118,14 @@ class BaseLauncherController(
     def get_project_entity(self, project_name):
         return self._projects_model.get_project_entity(project_name)
 
+    def get_project_status_items(self, project_name, sender=None):
+        return self._projects_model.get_project_status_items(
+            project_name, sender)
+
+    def get_project_status_item(self, project_name, status_name):
+        return self._projects_model.get_project_status_item(
+            project_name, status_name)
+
     def get_folder_entity(self, project_name, folder_id):
         return self._hierarchy_model.get_folder_entity(
             project_name, folder_id)
