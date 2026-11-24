@@ -16,8 +16,7 @@ import pyblish.api
 from ayon_core.pipeline.plugin_discover import DiscoverResult
 
 from .lib import get_publish_instance_label
-
-CONTEXT_ID = "context"
+from .state import CONTEXT_ID, PublishStateHistory, PublishStateRecorder
 
 
 @dataclass
@@ -432,6 +431,7 @@ class _PublishReportDataUpdate:
         self._fill_id()
         self._fix_created_at()
         self._update_instances()
+        self._fix_state()
 
     def _parse_version(self) -> tuple[int, int, int]:
         version_str = self.data.get("report_version") or "0.0.1"
@@ -493,6 +493,14 @@ class _PublishReportDataUpdate:
         self.data["created_at"] = created_at_obj.to("local").isoformat()
         self.changed = True
 
+    def _fix_state(self) -> None:
+        # Key 'state' was added in report version 1.2.0, older reports
+        #   have no state recorded.
+        if "state" in self.data:
+            return
+        self.data["state"] = None
+        self.changed = True
+
     def _update_instances(self) -> None:
         instances = self.data.get("instances")
         if not instances or not isinstance(instances, dict):
@@ -533,7 +541,7 @@ class _PublishReportDataUpdate:
 
 @dataclass
 class PublishReport:
-    version: str = "1.1.1"
+    version: str = "1.2.0"
     label: str = ""
     id: str = field(default_factory=_new_id)
     created_at: str = field(default_factory=_new_created_at)
@@ -546,6 +554,8 @@ class PublishReport:
     context: PublishContextInfo = field(
         default_factory=PublishContextInfo.new
     )
+    # 'None' when report was created before state recording was added
+    state: PublishStateHistory | None = None
 
     def to_data(self, current_plugin_id: str | None = None) -> dict[str, Any]:
         return {
@@ -563,6 +573,7 @@ class PublishReport:
             "created_at": self.created_at,
             "report_version": self.version,
             "id": self.id,
+            "state": self.state.to_data() if self.state is not None else None,
         }
 
     def update_created_at(self) -> None:
@@ -643,7 +654,12 @@ class PublishReport:
         if not skip_data_update:
             updater = _PublishReportDataUpdate(data)
             updater.process()
+        state = None
+        state_data = data.get("state")
+        if state_data is not None:
+            state = PublishStateHistory.from_data(state_data)
         return cls(
+            state=state,
             id=data["id"],
             label=data["label"],
             version=data["report_version"],
@@ -707,9 +723,11 @@ class PublishReportMaker:
 
         self._plugin_info_by_id: dict[str, PublishPluginReportInfo] = {}
         self._all_instances_by_id: dict[str, pyblish.api.Instance] = {}
+        self._state_recorder = PublishStateRecorder()
         self._report = PublishReport(
             crashed_filepaths=crashed_filepaths,
             blocking_crashed_paths=list(blocking_crashed_paths),
+            state=self._state_recorder.history,
         )
         self._prepare_publish_plugin_items(publish_plugins)
 
@@ -721,6 +739,11 @@ class PublishReportMaker:
         return self._current_plugin_id
 
     current_plugin_id = property(get_current_plugin_id)
+
+    @property
+    def state_recorder(self) -> PublishStateRecorder:
+        """Recorder of publish state changes made by plugins."""
+        return self._state_recorder
 
     def reset(
         self,
@@ -742,10 +765,12 @@ class PublishReportMaker:
         self._current_plugin_id = None
         self._plugin_info_by_id = {}
         self._all_instances_by_id = {}
+        self._state_recorder = PublishStateRecorder()
 
         self._report = PublishReport(
             crashed_filepaths=crashed_filepaths,
             blocking_crashed_paths=list(blocking_crashed_paths),
+            state=self._state_recorder.history,
         )
 
         self._prepare_publish_plugin_items(publish_plugins)

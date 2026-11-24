@@ -36,6 +36,7 @@ from .constants import (
 )
 from .delegates import GroupItemDelegate
 from .lib import get_pretty_milliseconds
+from .state_widgets import PublishStateWidget
 from .model import (
     InstancesModel,
     InstanceProxyModel,
@@ -1409,6 +1410,31 @@ class DetailsWidget(QtWidgets.QWidget):
         return filter_level in self._level_filter
 
 
+class LogsAndStateWidget(QtWidgets.QSplitter):
+    """Logs above publish state tree and state history.
+
+    Any part can be collapsed using the splitter handle.
+
+    """
+    def __init__(
+        self,
+        logs_widget: DetailsWidget,
+        state_widget: PublishStateWidget,
+        parent: QtWidgets.QWidget,
+    ) -> None:
+        super().__init__(QtCore.Qt.Vertical, parent)
+        self.setChildrenCollapsible(True)
+        self.addWidget(logs_widget)
+        self.addWidget(state_widget)
+        self.setStretchFactor(0, 3)
+        self.setStretchFactor(1, 2)
+        self._logs_widget = logs_widget
+
+    def set_active(self, is_active: bool) -> None:
+        """Logs are loaded only when active."""
+        self._logs_widget.set_active(is_active)
+
+
 class PluginDetailsWidget(QtWidgets.QWidget):
     def __init__(
         self,
@@ -1886,13 +1912,17 @@ class PublishReportViewerWidget(QtWidgets.QFrame):
         details_popup = DetailsPopup(self, details_tab_widget)
 
         logs_text_widget = DetailsWidget(details_tab_widget)
+        state_widget = PublishStateWidget(details_tab_widget)
+        logs_and_state_widget = LogsAndStateWidget(
+            logs_text_widget, state_widget, details_tab_widget
+        )
         plugin_load_report_widget = PluginLoadReportWidget(details_tab_widget)
         plugins_details_widget = PluginsDetailsWidget(details_tab_widget)
 
         plugin_load_report_widget.set_active(False)
         plugins_details_widget.set_active(False)
 
-        details_tab_widget.addTab(logs_text_widget, "Logs")
+        details_tab_widget.addTab(logs_and_state_widget, "Logs && State")
         details_tab_widget.addTab(plugins_details_widget, "Plugins Details")
         details_tab_widget.addTab(
             plugin_load_report_widget, "Crashed plugins"
@@ -1937,11 +1967,14 @@ class PublishReportViewerWidget(QtWidgets.QFrame):
         )
         details_popup_btn.clicked.connect(self._on_details_popup)
         details_popup.closed.connect(self._on_popup_close)
+        state_widget.step_hovered.connect(self._on_state_step_hovered)
+        state_widget.step_clicked.connect(self._on_state_step_clicked)
 
         self._current_tab_idx = 0
         self._ignore_selection_changes = False
         self._report_item = None
         self._logs_text_widget = logs_text_widget
+        self._state_widget = state_widget
         self._plugin_load_report_widget = plugin_load_report_widget
         self._plugins_details_widget = plugins_details_widget
 
@@ -2011,6 +2044,7 @@ class PublishReportViewerWidget(QtWidgets.QFrame):
         self._instances_model.set_report(report, errored_instance_ids)
         self._plugins_model.set_report(report, errored_plugin_ids)
         self._logs_text_widget.set_report(report)
+        self._state_widget.set_report(report)
         self._plugin_load_report_widget.set_report(report)
         self._plugins_details_widget.set_report(report)
         if report is not None and report.blocking_crashed_paths:
@@ -2037,12 +2071,83 @@ class PublishReportViewerWidget(QtWidgets.QFrame):
         if self._ignore_selection_changes:
             return
 
-        instance_ids = set()
-        for index in self._instances_view.selectedIndexes():
-            if index.isValid():
-                instance_ids.add(index.data(ITEM_ID_ROLE))
+        self._logs_text_widget.set_instance_filter(
+            self._get_selected_instance_ids()
+        )
+        self._update_state_selection()
 
-        self._logs_text_widget.set_instance_filter(instance_ids)
+    def _get_selected_instance_ids(self) -> set[str]:
+        return {
+            index.data(ITEM_ID_ROLE)
+            for index in self._instances_view.selectedIndexes()
+            if index.isValid() and not index.data(ITEM_IS_GROUP_ROLE)
+        }
+
+    def _update_state_selection(self) -> None:
+        plugin_ids = {
+            index.data(ITEM_ID_ROLE)
+            for index in self._plugins_view.selectedIndexes()
+            if index.isValid() and not index.data(ITEM_IS_GROUP_ROLE)
+        }
+        self._state_widget.set_selection(
+            plugin_ids, self._get_selected_instance_ids()
+        )
+
+    def _on_state_step_hovered(
+        self, plugin_id: str | None, instance_id: str | None
+    ) -> None:
+        self._plugins_delegate.set_highlighted_id(plugin_id)
+        self._instances_delegate.set_highlighted_id(instance_id)
+        self._plugins_view.viewport().update()
+        self._instances_view.viewport().update()
+
+    def _on_state_step_clicked(
+        self, plugin_id: str, instance_id: str
+    ) -> None:
+        """Select plugin and instance of a state step."""
+        self._ignore_selection_changes = True
+        try:
+            self._select_item_by_id(
+                self._plugins_view,
+                self._plugins_proxy,
+                self._plugins_model,
+                plugin_id,
+            )
+            self._select_item_by_id(
+                self._instances_view,
+                self._instances_proxy,
+                self._instances_model,
+                instance_id,
+            )
+        finally:
+            self._ignore_selection_changes = False
+        self._logs_text_widget.set_instance_filter(
+            self._get_selected_instance_ids()
+        )
+        self._update_plugin_filter()
+
+    @staticmethod
+    def _select_item_by_id(
+        view: QtWidgets.QTreeView,
+        proxy: QtCore.QSortFilterProxyModel,
+        model: InstancesModel | PluginsModel,
+        item_id: str,
+    ) -> None:
+        """Select only item with the id, clear selection if not visible."""
+        selection_model = view.selectionModel()
+        item = model.get_items_by_id().get(item_id)
+        proxy_index = QtCore.QModelIndex()
+        if item is not None:
+            proxy_index = proxy.mapFromSource(item.index())
+        if not proxy_index.isValid():
+            selection_model.clearSelection()
+            return
+        selection_model.setCurrentIndex(
+            proxy_index,
+            QtCore.QItemSelectionModel.ClearAndSelect
+            | QtCore.QItemSelectionModel.Rows,
+        )
+        view.scrollTo(proxy_index)
 
     def _on_plugin_change(self, *_args):
         if self._ignore_selection_changes:
@@ -2080,6 +2185,7 @@ class PublishReportViewerWidget(QtWidgets.QFrame):
 
         self._logs_text_widget.set_plugin_filter(logs_plugin_filter)
         self._plugins_details_widget.set_plugin_filter(plugin_ids)
+        self._update_state_selection()
 
     def _on_plugins_filter_timer(self) -> None:
         self._plugins_proxy.set_filter_text(

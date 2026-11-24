@@ -3,6 +3,7 @@ from __future__ import annotations
 import collections
 from qtpy import QtWidgets, QtCore, QtGui
 from .constants import (
+    ITEM_ID_ROLE,
     ITEM_IS_GROUP_ROLE,
     ITEM_ERRORED_ROLE,
     PLUGIN_SKIPPED_ROLE,
@@ -28,7 +29,8 @@ colors = {
     "outline": QtGui.QColor("#333"),
     "group": QtGui.QColor("#21252B"),
     "group-hover": QtGui.QColor("#3c3c3c"),
-    "group-selected-hover": QtGui.QColor("#555555")
+    "group-selected-hover": QtGui.QColor("#555555"),
+    "state-highlight": QtGui.QColor(94, 169, 230, 90),
 }
 
 
@@ -50,6 +52,11 @@ class GroupItemDelegate(QtWidgets.QStyledItemDelegate):
         super().__init__(*args, **kwargs)
         self._show_process_time: bool = False
         self._show_time_bars: bool = False
+        self._highlighted_id: str | None = None
+
+    def set_highlighted_id(self, item_id: str | None) -> None:
+        """Highlight item with the id, e.g. on hover in state history."""
+        self._highlighted_id = item_id
 
     def set_show_process_time(self, show: bool) -> None:
         """Show process time on the right side of plugin items."""
@@ -230,6 +237,12 @@ class GroupItemDelegate(QtWidgets.QStyledItemDelegate):
         bg_rect = QtCore.QRectF(option.rect)
         bg_rect.setY(_rect.y())
         bg_rect.setHeight(_rect.height())
+
+        if (
+            self._highlighted_id is not None
+            and index.data(ITEM_ID_ROLE) == self._highlighted_id
+        ):
+            painter.fillRect(bg_rect, colors["state-highlight"])
 
         process_time = index.data(PLUGIN_PROCESS_TIME_ROLE)
         if self._show_time_bars and process_time:

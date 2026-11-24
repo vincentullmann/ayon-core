@@ -23,6 +23,7 @@ from .publish_plugins import (
     PublishValidationError,
     OptionalPyblishPluginMixin,
 )
+from .state import CONTEXT_ID
 from .report import (
     PublishReportMaker,
     PublishReport,
@@ -1076,10 +1077,20 @@ class PublishLogic:
         instance: pyblish.api.Instance | None
     ) -> None:
         plugin_id = self.get_publish_plugin_id(plugin)
+        state_recorder = self._publish_report.state_recorder
+        state_recorder.begin_step(self._pyblish_context)
         with self._log_manager(plugin) as log_handler:
-            result = pyblish.plugin.process(
-                plugin, self._pyblish_context, instance
-            )
+            try:
+                with state_recorder.track_reads():
+                    result = pyblish.plugin.process(
+                        plugin, self._pyblish_context, instance
+                    )
+            finally:
+                state_recorder.end_step(
+                    self._pyblish_context,
+                    plugin_id,
+                    instance.id if instance is not None else CONTEXT_ID,
+                )
             if log_handler is not None:
                 records = log_handler.get_records()
                 exception = result.get("error")

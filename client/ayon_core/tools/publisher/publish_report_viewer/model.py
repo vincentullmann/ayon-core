@@ -98,6 +98,7 @@ class InstancesModel(QtGui.QStandardItemModel):
         context_item.setData(False, ITEM_IS_GROUP_ROLE)
         context_item.setData(False, INSTANCE_REMOVED_ROLE)
         self._instance_items_by_id[CONTEXT_ID] = context_item
+        self._items_by_id[CONTEXT_ID] = context_item
 
         family_items = [context_item]
         for family in all_families:
