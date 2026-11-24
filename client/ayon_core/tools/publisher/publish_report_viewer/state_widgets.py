@@ -19,7 +19,10 @@ from ayon_core.pipeline.publish.state import (
 from ayon_core.tools.utils import get_qt_icon
 
 if typing.TYPE_CHECKING:
-    from ayon_core.pipeline.publish.report import PublishReport
+    from ayon_core.pipeline.publish.report import (
+        PublishPluginReportInfo,
+        PublishReport,
+    )
     from ayon_core.pipeline.publish.state import (
         PublishStateHistory,
         StateHistoryEntry,
@@ -32,9 +35,16 @@ STATE_DIM_BADGES_ROLE = QtCore.Qt.UserRole + 5
 STATE_FILLED_ROLE = QtCore.Qt.UserRole + 6
 HISTORY_STEP_ROLE = QtCore.Qt.UserRole + 11
 
-KEY_COLUMN = 0
-BADGES_COLUMN = 1
+BADGES_COLUMN = 0
+KEY_COLUMN = 1
 VALUE_COLUMN = 2
+# Item in this column holds node data and children rows
+ANCHOR_COLUMN = BADGES_COLUMN
+
+HISTORY_ORDER_COLUMN = 0
+HISTORY_PLUGIN_COLUMN = 1
+HISTORY_OP_COLUMN = 2
+HISTORY_VALUE_COLUMN = 3
 
 OUTSIDE_PLUGINS_LABEL = "Outside plugins"
 
@@ -58,6 +68,9 @@ BADGE_TOOLTIPS = {
     "read": "Read",
     "removed": "Removed",
 }
+
+# Rows without changes and steps after the last selected step
+DIMMED_COLOR = "#7a8089"
 
 _MAX_VALUE_TEXT = 300
 
@@ -131,7 +144,7 @@ class StateTreeModel(QtGui.QStandardItemModel):
     """
     def __init__(self, parent: QtCore.QObject | None = None) -> None:
         super().__init__(parent)
-        self.setHorizontalHeaderLabels(["Key", "", "Value"])
+        self.setHorizontalHeaderLabels(["", "Key", "Value"])
         self._badges: dict[tuple[str, StatePath], set[BadgeOp]] = {}
         self._dim_badges: dict[tuple[str, StatePath], set[str]] = {}
         self._removed_values: dict[tuple[str, StatePath], Any] = {}
@@ -146,10 +159,17 @@ class StateTreeModel(QtGui.QStandardItemModel):
         """Get root, path and value of item."""
         if not index.isValid():
             return None
-        node_id = index.siblingAtColumn(KEY_COLUMN).data(STATE_NODE_ROLE)
+        node_id = index.siblingAtColumn(ANCHOR_COLUMN).data(STATE_NODE_ROLE)
         if node_id is None:
             return None
         return self._nodes.get(node_id)
+
+    def should_auto_expand(self, index: QtCore.QModelIndex) -> bool:
+        """Roots and items with changed children are expanded."""
+        node = self.get_node(index)
+        if node is None:
+            return False
+        return not node.path or (node.root, node.path) in self._dim_badges
 
     def set_state(
         self,
@@ -202,7 +222,7 @@ class StateTreeModel(QtGui.QStandardItemModel):
         """Create children of item if not created yet."""
         if not index.isValid():
             return
-        item = self.itemFromIndex(index.siblingAtColumn(KEY_COLUMN))
+        item = self.itemFromIndex(index.siblingAtColumn(ANCHOR_COLUMN))
         node = self.get_node(index)
         if item is None or node is None or item.data(STATE_FILLED_ROLE):
             return
@@ -254,10 +274,6 @@ class StateTreeModel(QtGui.QStandardItemModel):
 
         key_item = QtGui.QStandardItem(label)
         key_item.setEditable(False)
-        node_id = len(self._nodes)
-        self._nodes[node_id] = StateNode(root, path, value)
-        key_item.setData(node_id, STATE_NODE_ROLE)
-        key_item.setData(False, STATE_FILLED_ROLE)
         if not path:
             _set_font_style(key_item, bold=True)
         for op in BADGE_ORDER:
@@ -269,9 +285,17 @@ class StateTreeModel(QtGui.QStandardItemModel):
                 break
         if removed:
             _set_font_style(key_item, strike_out=True)
+        # Dim rows without changes, only when changes are shown
+        is_dimmed = bool(self._badges) and not ops and not dim_ops
+        if is_dimmed:
+            key_item.setForeground(QtGui.QColor(DIMMED_COLOR))
 
         badges_item = QtGui.QStandardItem()
         badges_item.setEditable(False)
+        node_id = len(self._nodes)
+        self._nodes[node_id] = StateNode(root, path, value)
+        badges_item.setData(node_id, STATE_NODE_ROLE)
+        badges_item.setData(False, STATE_FILLED_ROLE)
         badges_item.setData(
             [op for op in BADGE_ORDER if op in ops], STATE_BADGES_ROLE
         )
@@ -296,11 +320,13 @@ class StateTreeModel(QtGui.QStandardItemModel):
         if removed:
             value_item.setForeground(QtGui.QColor(BADGE_COLORS["removed"]))
             _set_font_style(value_item, strike_out=True)
+        elif is_dimmed:
+            value_item.setForeground(QtGui.QColor(DIMMED_COLOR))
 
         if isinstance(value, (dict, list)) and value:
             # Placeholder so the item can be expanded
-            key_item.appendRow([QtGui.QStandardItem()])
-        return [key_item, badges_item, value_item]
+            badges_item.appendRow([QtGui.QStandardItem()])
+        return [badges_item, key_item, value_item]
 
 
 class StateBadgesDelegate(QtWidgets.QStyledItemDelegate):
@@ -343,32 +369,49 @@ class StateHistoryModel(QtGui.QStandardItemModel):
         self._reset_header()
 
     def _reset_header(self) -> None:
-        self.setHorizontalHeaderLabels(
-            ["#", "Plugin", "Instance", "Op", "Path", "Value"]
-        )
+        self.setHorizontalHeaderLabels(["Order", "Plugin", "Op", "Value"])
 
     def set_history(
         self,
         history: PublishStateHistory | None,
         entries: list[StateHistoryEntry],
-        plugin_labels: dict[str, str],
+        plugin_infos: dict[str, PublishPluginReportInfo],
         instance_labels: dict[str, str],
+        selected_steps: set[int],
     ) -> None:
+        """Show history entries of a state path.
+
+        Args:
+            history (PublishStateHistory | None): Recorded state history.
+            entries (list[StateHistoryEntry]): Entries to show.
+            plugin_infos (dict[str, PublishPluginReportInfo]): Plugins
+                by id.
+            instance_labels (dict[str, str]): Instance labels by id.
+            selected_steps (set[int]): Selected step indexes. Plugin of
+                selected step is bold, steps after the last selected step
+                are dimmed.
+
+        """
         self.removeRows(0, self.rowCount())
         if history is None:
             return
+        last_selected = max(selected_steps) if selected_steps else None
         for entry in entries:
             step = history.steps[entry.step_index]
+            order_text = ""
+            plugin_tooltip = ""
             if step.source == STEP_SOURCE_OUTSIDE:
                 plugin_label = OUTSIDE_PLUGINS_LABEL
-                instance_label = ""
             else:
-                plugin_label = plugin_labels.get(
-                    step.plugin_id, step.plugin_id or ""
-                )
+                plugin_info = plugin_infos.get(step.plugin_id or "")
+                plugin_label = step.plugin_id or ""
+                if plugin_info is not None:
+                    plugin_label = plugin_info.label or plugin_info.name
+                    order_text = f"{plugin_info.order:g}"
                 instance_label = instance_labels.get(
-                    step.instance_id, step.instance_id or ""
+                    step.instance_id or "", step.instance_id or ""
                 )
+                plugin_tooltip = f"{plugin_label}\nInstance: {instance_label}"
 
             if entry.op == "read":
                 value_text = ""
@@ -383,11 +426,9 @@ class StateHistoryModel(QtGui.QStandardItemModel):
                 value_text = _format_value(entry.value)
 
             texts = [
-                str(entry.step_index + 1),
+                order_text,
                 plugin_label,
-                instance_label,
                 BADGE_TOOLTIPS[entry.op],
-                _format_path(entry.path),
                 value_text,
             ]
             items = []
@@ -397,10 +438,29 @@ class StateHistoryModel(QtGui.QStandardItemModel):
                 item.setToolTip(text)
                 item.setData(entry.step_index, HISTORY_STEP_ROLE)
                 items.append(item)
-            items[3].setIcon(_get_badge_icon(entry.op))
-            items[3].setForeground(QtGui.QColor(BADGE_COLORS[entry.op]))
+            plugin_item = items[HISTORY_PLUGIN_COLUMN]
+            op_item = items[HISTORY_OP_COLUMN]
+            if plugin_tooltip:
+                plugin_item.setToolTip(plugin_tooltip)
+            if entry.path:
+                op_item.setToolTip(
+                    f"{BADGE_TOOLTIPS[entry.op]}: {_format_path(entry.path)}"
+                )
+            op_item.setIcon(_get_badge_icon(entry.op))
+
+            is_future = (
+                last_selected is not None
+                and entry.step_index > last_selected
+            )
+            if is_future:
+                for item in items:
+                    item.setForeground(QtGui.QColor(DIMMED_COLOR))
+            else:
+                op_item.setForeground(QtGui.QColor(BADGE_COLORS[entry.op]))
+            if entry.step_index in selected_steps:
+                _set_font_style(plugin_item, bold=True)
             if step.source == STEP_SOURCE_OUTSIDE:
-                _set_font_style(items[1], italic=True)
+                _set_font_style(plugin_item, italic=True)
             self.appendRow(items)
 
 
@@ -442,6 +502,8 @@ class PublishStateWidget(QtWidgets.QWidget):
         )
         badges_delegate = StateBadgesDelegate(state_view)
         state_view.setItemDelegateForColumn(BADGES_COLUMN, badges_delegate)
+        # Badges are first, expand arrows are next to keys
+        state_view.setTreePosition(KEY_COLUMN)
         header = state_view.header()
         header.setStretchLastSection(True)
         header.setSectionResizeMode(
@@ -494,18 +556,19 @@ class PublishStateWidget(QtWidgets.QWidget):
         self._instance_ids: set[str] = set()
         self._selected_path: tuple[str, StatePath] | None = None
         self._hovered_step: int | None = None
-        self._plugin_labels: dict[str, str] = {}
+        self._plugin_infos: dict[str, PublishPluginReportInfo] = {}
         self._instance_labels: dict[str, str] = {}
+        self._selected_steps: set[int] = set()
 
         self._update_visibility()
 
     def set_report(self, report: PublishReport | None) -> None:
         self._report = report
-        self._plugin_labels = {}
+        self._plugin_infos = {}
         self._instance_labels = {}
         if report is not None:
-            self._plugin_labels = {
-                plugin_info.id: plugin_info.label or plugin_info.name
+            self._plugin_infos = {
+                plugin_info.id: plugin_info
                 for plugin_info in report.plugins_info
             }
             self._instance_labels = {
@@ -548,6 +611,7 @@ class PublishStateWidget(QtWidgets.QWidget):
 
     def _refresh(self) -> None:
         history = self._get_history()
+        self._selected_steps = set()
         if history is None:
             self._state_model.set_state([], {}, None)
             self._update_history()
@@ -562,6 +626,7 @@ class PublishStateWidget(QtWidgets.QWidget):
             step_indexes = history.get_step_indexes(
                 self._plugin_ids or None, self._instance_ids or None
             )
+            self._selected_steps = set(step_indexes)
             if step_indexes:
                 state = history.state_at(step_indexes[-1])
                 badges = history.changes_for(step_indexes)
@@ -603,8 +668,20 @@ class PublishStateWidget(QtWidgets.QWidget):
             self._state_model.set_state(roots, state, badges)
         finally:
             selection_model.blockSignals(False)
+        self._auto_expand(QtCore.QModelIndex())
         self._restore_selected_path()
         self._update_history()
+
+    def _auto_expand(self, parent: QtCore.QModelIndex) -> None:
+        """Expand roots and items leading to changes."""
+        model = self._state_model
+        for row in range(model.rowCount(parent)):
+            index = model.index(row, ANCHOR_COLUMN, parent)
+            if not model.should_auto_expand(index):
+                continue
+            model.fill_children(index)
+            self._state_view.expand(index)
+            self._auto_expand(index)
 
     def _get_root_order(
         self, history: PublishStateHistory, state: dict[str, Any]
@@ -630,7 +707,7 @@ class PublishStateWidget(QtWidgets.QWidget):
         for depth in range(len(path) + 1):
             match = None
             for row in range(model.rowCount(parent)):
-                index = model.index(row, KEY_COLUMN, parent)
+                index = model.index(row, ANCHOR_COLUMN, parent)
                 node = model.get_node(index)
                 if (
                     node is not None
@@ -650,6 +727,7 @@ class PublishStateWidget(QtWidgets.QWidget):
         if not found.isValid():
             return
         selection_model = self._state_view.selectionModel()
+        found = found.siblingAtColumn(KEY_COLUMN)
         selection_model.blockSignals(True)
         self._state_view.setCurrentIndex(found)
         selection_model.blockSignals(False)
@@ -662,7 +740,11 @@ class PublishStateWidget(QtWidgets.QWidget):
             root, path = self._selected_path
             entries = history.history_for(root, path)
         self._history_model.set_history(
-            history, entries, self._plugin_labels, self._instance_labels
+            history,
+            entries,
+            self._plugin_infos,
+            self._instance_labels,
+            self._selected_steps,
         )
         for column in range(self._history_model.columnCount() - 1):
             self._history_view.resizeColumnToContents(column)
