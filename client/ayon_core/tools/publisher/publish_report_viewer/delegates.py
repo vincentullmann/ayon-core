@@ -30,7 +30,7 @@ colors = {
     "group": QtGui.QColor("#21252B"),
     "group-hover": QtGui.QColor("#3c3c3c"),
     "group-selected-hover": QtGui.QColor("#555555"),
-    "state-highlight": QtGui.QColor(94, 169, 230, 90),
+    "state-highlight": QtGui.QColor(190, 130, 235, 90),
 }
 
 

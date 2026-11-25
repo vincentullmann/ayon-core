@@ -1410,31 +1410,6 @@ class DetailsWidget(QtWidgets.QWidget):
         return filter_level in self._level_filter
 
 
-class LogsAndStateWidget(QtWidgets.QSplitter):
-    """Logs above publish state tree and state history.
-
-    Any part can be collapsed using the splitter handle.
-
-    """
-    def __init__(
-        self,
-        logs_widget: DetailsWidget,
-        state_widget: PublishStateWidget,
-        parent: QtWidgets.QWidget,
-    ) -> None:
-        super().__init__(QtCore.Qt.Vertical, parent)
-        self.setChildrenCollapsible(True)
-        self.addWidget(logs_widget)
-        self.addWidget(state_widget)
-        self.setStretchFactor(0, 3)
-        self.setStretchFactor(1, 2)
-        self._logs_widget = logs_widget
-
-    def set_active(self, is_active: bool) -> None:
-        """Logs are loaded only when active."""
-        self._logs_widget.set_active(is_active)
-
-
 class PluginDetailsWidget(QtWidgets.QWidget):
     def __init__(
         self,
@@ -1881,6 +1856,8 @@ class PublishReportViewerWidget(QtWidgets.QFrame):
         plugins_view.setEditTriggers(
             QtWidgets.QAbstractItemView.NoEditTriggers)
         plugins_view.setExpandsOnDoubleClick(False)
+        plugins_view.setMouseTracking(True)
+        plugins_view.viewport().installEventFilter(self)
 
         plugins_delegate = GroupItemDelegate(plugins_view)
         plugins_view.setItemDelegate(plugins_delegate)
@@ -1888,41 +1865,35 @@ class PublishReportViewerWidget(QtWidgets.QFrame):
         details_widget = QtWidgets.QWidget(self)
         details_tab_widget = QtWidgets.QTabWidget(details_widget)
 
-        btns_widget = QtWidgets.QWidget(details_widget)
-
         popout_image = QtGui.QImage(get_image_path("popout.png"))
         popout_color = get_objected_colors("font")
         popout_icon = QtGui.QIcon(
             paint_image_with_color(popout_image, popout_color.get_qcolor())
         )
-        details_popup_btn = IconButton(btns_widget)
+        details_popup_btn = IconButton(details_tab_widget)
         details_popup_btn.setIcon(popout_icon)
         details_popup_btn.setToolTip("Pop Out")
 
-        btns_layout = QtWidgets.QHBoxLayout(btns_widget)
-        btns_layout.setContentsMargins(0, 0, 0, 0)
-        btns_layout.addStretch(1)
-        btns_layout.addWidget(details_popup_btn, 0)
+        details_tab_widget.setCornerWidget(
+            details_popup_btn, QtCore.Qt.TopRightCorner
+        )
 
         details_layout = QtWidgets.QVBoxLayout(details_widget)
         details_layout.setContentsMargins(0, 0, 0, 0)
         details_layout.addWidget(details_tab_widget, 1)
-        details_layout.addWidget(btns_widget, 0)
 
         details_popup = DetailsPopup(self, details_tab_widget)
 
         logs_text_widget = DetailsWidget(details_tab_widget)
         state_widget = PublishStateWidget(details_tab_widget)
-        logs_and_state_widget = LogsAndStateWidget(
-            logs_text_widget, state_widget, details_tab_widget
-        )
         plugin_load_report_widget = PluginLoadReportWidget(details_tab_widget)
         plugins_details_widget = PluginsDetailsWidget(details_tab_widget)
 
         plugin_load_report_widget.set_active(False)
         plugins_details_widget.set_active(False)
 
-        details_tab_widget.addTab(logs_and_state_widget, "Logs && State")
+        details_tab_widget.addTab(logs_text_widget, "Logs")
+        details_tab_widget.addTab(state_widget, "State")
         details_tab_widget.addTab(plugins_details_widget, "Plugins Details")
         details_tab_widget.addTab(
             plugin_load_report_widget, "Crashed plugins"
@@ -1967,6 +1938,7 @@ class PublishReportViewerWidget(QtWidgets.QFrame):
         )
         details_popup_btn.clicked.connect(self._on_details_popup)
         details_popup.closed.connect(self._on_popup_close)
+        plugins_view.entered.connect(self._on_plugin_entered)
         state_widget.step_hovered.connect(self._on_state_step_hovered)
         state_widget.step_clicked.connect(self._on_state_step_clicked)
 
@@ -2093,6 +2065,20 @@ class PublishReportViewerWidget(QtWidgets.QFrame):
             plugin_ids, self._get_selected_instance_ids()
         )
 
+    def eventFilter(self, watched, event):
+        if (
+            watched is self._plugins_view.viewport()
+            and event.type() == QtCore.QEvent.Leave
+        ):
+            self._state_widget.set_hovered_plugin(None)
+        return super().eventFilter(watched, event)
+
+    def _on_plugin_entered(self, index: QtCore.QModelIndex) -> None:
+        plugin_id = None
+        if index.isValid() and not index.data(ITEM_IS_GROUP_ROLE):
+            plugin_id = index.data(ITEM_ID_ROLE)
+        self._state_widget.set_hovered_plugin(plugin_id)
+
     def _on_state_step_hovered(
         self, plugin_id: str | None, instance_id: str | None
     ) -> None:
@@ -2102,9 +2088,9 @@ class PublishReportViewerWidget(QtWidgets.QFrame):
         self._instances_view.viewport().update()
 
     def _on_state_step_clicked(
-        self, plugin_id: str, instance_id: str
+        self, plugin_id: str, _instance_id: str | None
     ) -> None:
-        """Select plugin and instance of a state step."""
+        """Select plugin of a state step, instances are kept."""
         self._ignore_selection_changes = True
         try:
             self._select_item_by_id(
@@ -2113,17 +2099,8 @@ class PublishReportViewerWidget(QtWidgets.QFrame):
                 self._plugins_model,
                 plugin_id,
             )
-            self._select_item_by_id(
-                self._instances_view,
-                self._instances_proxy,
-                self._instances_model,
-                instance_id,
-            )
         finally:
             self._ignore_selection_changes = False
-        self._logs_text_widget.set_instance_filter(
-            self._get_selected_instance_ids()
-        )
         self._update_plugin_filter()
 
     @staticmethod
@@ -2135,10 +2112,18 @@ class PublishReportViewerWidget(QtWidgets.QFrame):
     ) -> None:
         """Select only item with the id, clear selection if not visible."""
         selection_model = view.selectionModel()
-        item = model.get_items_by_id().get(item_id)
+        # Items in 'get_items_by_id' can be detached from the model
         proxy_index = QtCore.QModelIndex()
-        if item is not None:
-            proxy_index = proxy.mapFromSource(item.index())
+        if item_id is not None and proxy.rowCount():
+            matches = proxy.match(
+                proxy.index(0, 0),
+                ITEM_ID_ROLE,
+                item_id,
+                1,
+                QtCore.Qt.MatchExactly | QtCore.Qt.MatchRecursive,
+            )
+            if matches:
+                proxy_index = matches[0]
         if not proxy_index.isValid():
             selection_model.clearSelection()
             return
